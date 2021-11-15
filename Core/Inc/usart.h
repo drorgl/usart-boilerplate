@@ -40,7 +40,9 @@ extern UART_HandleTypeDef huart2;
 void MX_USART2_UART_Init(void);
 
 /* USER CODE BEGIN Prototypes */
-
+void put_tx_data_with_wait(uint8_t *buffer, size_t buffer_length);
+int put_tx_data(uint8_t *buffer, size_t buffer_length);
+int get_rx_data(uint8_t *buffer, size_t buffer_length, uint32_t timeout);
 /* USER CODE END Prototypes */
 
 #ifdef __cplusplus

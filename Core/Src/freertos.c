@@ -26,7 +26,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "usart.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -122,11 +122,12 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  /* Infinite loop */
-  for(;;)
-  {
-    osDelay(1);
-  }
+	while (1){
+		uint8_t temp_buffer[64];
+		size_t read_bytes;
+		read_bytes =get_rx_data(temp_buffer, sizeof(temp_buffer), 100);
+		put_tx_data_with_wait(temp_buffer,read_bytes);
+	}
   /* USER CODE END StartDefaultTask */
 }
 

@@ -22,6 +22,41 @@
 
 /* USER CODE BEGIN 0 */
 
+#include <cmsis_os.h>
+#include "lwrb/lwrb.h"
+
+static SemaphoreHandle_t readSemaphore;
+static osSemaphoreId writeSemaphore;
+
+#define TX_DMA_BUFFER_SIZE 16
+__aligned(32) uint8_t TX_DMA_buffer[TX_DMA_BUFFER_SIZE];
+
+#define RX_DMA_BUFFER_SIZE 16
+__aligned(32) uint8_t RX_DMA_buffer[RX_DMA_BUFFER_SIZE];
+
+lwrb_t rx_buffer;
+uint8_t rx_buffer_container[255];
+
+lwrb_t tx_buffer;
+uint8_t tx_buffer_container[255];
+
+void initialize_buffers(void) {
+	osSemaphoreDef(WRITESEM);
+	writeSemaphore = osSemaphoreCreate(osSemaphore(WRITESEM), 1);
+
+	vSemaphoreCreateBinary(readSemaphore);
+	if (readSemaphore == NULL) {
+		Error_Handler();
+	}
+
+	if (lwrb_init(&rx_buffer, rx_buffer_container, sizeof(rx_buffer_container)) != 1){
+		Error_Handler();
+	}
+	if (lwrb_init(&tx_buffer, tx_buffer_container, sizeof(tx_buffer_container)) != 1){
+		Error_Handler();
+	}
+}
+
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart2;
@@ -34,7 +69,7 @@ void MX_USART2_UART_Init(void)
 {
 
   /* USER CODE BEGIN USART2_Init 0 */
-
+	initialize_buffers();
   /* USER CODE END USART2_Init 0 */
 
   /* USER CODE BEGIN USART2_Init 1 */
@@ -53,7 +88,8 @@ void MX_USART2_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART2_Init 2 */
-
+  HAL_UARTEx_ReceiveToIdle_DMA(&huart2, RX_DMA_buffer, RX_DMA_BUFFER_SIZE);
+  __HAL_DMA_DISABLE_IT(&hdma_usart2_rx, DMA_IT_HT);
   /* USER CODE END USART2_Init 2 */
 
 }
@@ -65,7 +101,6 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
   if(uartHandle->Instance==USART2)
   {
   /* USER CODE BEGIN USART2_MspInit 0 */
-
   /* USER CODE END USART2_MspInit 0 */
     /* USART2 clock enable */
     __HAL_RCC_USART2_CLK_ENABLE();
@@ -119,6 +154,9 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
 
     __HAL_LINKDMA(uartHandle,hdmatx,hdma_usart2_tx);
 
+    /* USART2 interrupt Init */
+    HAL_NVIC_SetPriority(USART2_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
   /* USER CODE BEGIN USART2_MspInit 1 */
 
   /* USER CODE END USART2_MspInit 1 */
@@ -131,7 +169,6 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
   if(uartHandle->Instance==USART2)
   {
   /* USER CODE BEGIN USART2_MspDeInit 0 */
-
   /* USER CODE END USART2_MspDeInit 0 */
     /* Peripheral clock disable */
     __HAL_RCC_USART2_CLK_DISABLE();
@@ -145,6 +182,9 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
     /* USART2 DMA DeInit */
     HAL_DMA_DeInit(uartHandle->hdmarx);
     HAL_DMA_DeInit(uartHandle->hdmatx);
+
+    /* USART2 interrupt Deinit */
+    HAL_NVIC_DisableIRQ(USART2_IRQn);
   /* USER CODE BEGIN USART2_MspDeInit 1 */
 
   /* USER CODE END USART2_MspDeInit 1 */
@@ -152,6 +192,68 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 }
 
 /* USER CODE BEGIN 1 */
+
+static int tx_next_chunk(void) {
+	int number_of_items_in_tx_buffer = lwrb_read(&tx_buffer, TX_DMA_buffer, TX_DMA_BUFFER_SIZE);
+	if (number_of_items_in_tx_buffer > 0) {
+		if (HAL_UART_Transmit_DMA(&huart2, TX_DMA_buffer,
+				number_of_items_in_tx_buffer) != HAL_OK) {
+			assert(0);
+		}
+		__HAL_DMA_DISABLE_IT(&hdma_usart2_rx, DMA_IT_HT);
+	}
+	return number_of_items_in_tx_buffer;
+}
+
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size) {
+	if (huart->Instance == USART2) {
+		if (lwrb_write(&rx_buffer,  RX_DMA_buffer, Size) != Size ){
+			//buffer overrun
+		}
+
+		HAL_UARTEx_ReceiveToIdle_DMA(huart, RX_DMA_buffer, RX_DMA_BUFFER_SIZE);
+		BaseType_t xHigherPriorityTaskWoken;
+		xSemaphoreGiveFromISR(readSemaphore,&xHigherPriorityTaskWoken);
+	}
+}
+
+int get_rx_data(uint8_t *buffer, size_t buffer_length, uint32_t timeout) {
+	xSemaphoreTake(readSemaphore,pdMS_TO_TICKS(timeout ));
+	return lwrb_read(&rx_buffer, buffer, buffer_length);
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+	if (huart->Instance == USART2) {
+		tx_next_chunk();
+	}
+}
+
+void put_tx_data_with_wait(uint8_t *buffer, size_t buffer_length) {
+	int retries = 1000;
+	while (retries > 0) {
+		int pushed_bytes = put_tx_data(buffer, buffer_length);
+		buffer_length -= pushed_bytes;
+		buffer += pushed_bytes;
+		if (buffer_length <= 0) {
+			break;
+		}
+		osDelay(1);
+		retries--;
+	}
+}
+
+int put_tx_data(uint8_t *buffer, size_t buffer_length) {
+	int ret = 0;
+	if (osSemaphoreWait(writeSemaphore, osWaitForever) == osOK) {
+		ret = lwrb_write(&tx_buffer, buffer, buffer_length);
+		osSemaphoreRelease(writeSemaphore);
+	}
+
+	if (huart2.gState == HAL_UART_STATE_READY) {
+		tx_next_chunk();
+	}
+	return ret;
+}
 
 /* USER CODE END 1 */
 
